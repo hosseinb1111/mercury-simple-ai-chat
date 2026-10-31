@@ -21,6 +21,17 @@ jobs:
         with:
           node-version: 20
 
+      # Fail fast with a clear message if the files are not at the repo root.
+      - name: Check project layout
+        run: |
+          for f in wrangler.toml package.json src/worker.js src/prompt.js public/index.html; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Missing $f at the top level of the repo. Upload the CONTENTS of the mercury-web folder to the repo root, not the folder itself."
+              exit 1
+            fi
+          done
+          echo "Layout OK"
+
       # Installs Wrangler 4 from package.json.
       - name: Install dependencies
         run: npm install
