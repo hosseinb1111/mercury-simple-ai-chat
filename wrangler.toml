@@ -1,0 +1,23 @@
+name = "mercury-web-chat"
+main = "src/worker.js"
+compatibility_date = "2025-09-01"
+
+# Static chat page from ./public. Only /api/* runs the Worker.
+[assets]
+directory = "./public"
+run_worker_first = ["/api/*"]
+
+# Cloudflare Workers AI: Whisper (voice), Llama 4 Scout (images) and toMarkdown (files).
+[ai]
+binding = "AI"
+
+# Plain settings. Secrets (INCEPTION_API_KEY) never go in this file.
+[vars]
+APP_TITLE = "Mercury Chat"
+INCEPTION_MODEL = "mercury-3"
+INCEPTION_API_URL = "https://api.inceptionlabs.ai/v1/chat/completions"
+INCEPTION_TEMPERATURE = "0.3"
+INCEPTION_REASONING_EFFORT = "medium"   # low | medium | high, or "off"
+MAX_UPLOAD_MB = "10"
+TRANSCRIBE_MODEL = "@cf/openai/whisper-large-v3-turbo"
+VISION_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct"
