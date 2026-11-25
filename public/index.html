@@ -658,6 +658,31 @@
     .scroll-down:hover:not(:disabled) { transform: translateY(-2px); border-color: var(--ac1); background: var(--glass-hv); color: var(--ac); }
     .scroll-down:active:not(:disabled) { transform: translateY(0) scale(.95); }
 
+    /* Answer actions: regenerate and retry */
+    .msg-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .act-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 28px;
+      padding: 0 10px;
+      border-radius: var(--r3);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--tx3);
+      background: var(--s1);
+      border: 1px solid var(--ln);
+    }
+    .act-btn:hover:not(:disabled) { color: var(--ac); border-color: var(--ac1); background: var(--ac0); }
+    .act-btn svg { flex: 0 0 auto; }
+    .msg.bot.error .act-btn { color: var(--rd); border-color: var(--rd1); background: var(--rd0); }
+    .msg.bot.error .act-btn:hover:not(:disabled) { color: var(--rd); border-color: var(--rd); background: var(--rd1); }
+
     /* Credit footer */
     .footer-bottom {
       display: flex;
@@ -1395,6 +1420,99 @@
       state.history.push({ role: "assistant", content: data.text });
     }
 
+    /* Answers keep the job that produced them, so they can be retried or regenerated */
+    const REFRESH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="13" height="13" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/></svg>';
+
+    function setAnswerActions(bubble) {
+      bubble.querySelector(":scope > .msg-actions")?.remove();
+      const bar = document.createElement("div");
+      bar.className = "msg-actions";
+      bar.innerHTML = `<button type="button" class="act-btn regen-btn" aria-label="Regenerate answer">${REFRESH_ICON}<span>Regenerate</span></button>`;
+      bubble.appendChild(bar);
+    }
+
+    function setErrorActions(bubble) {
+      bubble.querySelector(":scope > .msg-actions")?.remove();
+      const bar = document.createElement("div");
+      bar.className = "msg-actions";
+      bar.innerHTML = `<button type="button" class="act-btn retry-btn" aria-label="Retry request">${REFRESH_ICON}<span>Retry</span></button>`;
+      bubble.appendChild(bar);
+    }
+
+    function friendlyError(error) {
+      if (error instanceof TypeError) return "Network error: could not reach the server. Check your connection and retry.";
+      return error.message || "Something went wrong. Please try again.";
+    }
+
+    /* Runs one request into an answer bubble. Used by send, retry and regenerate. */
+    async function runTurn(bubble, job) {
+      const generation = state.generation;
+      const requestId = ++state.requestId;
+      const controller = new AbortController();
+      state.abort = controller;
+      setBusy(true);
+      bubble.className = "msg bot";
+      bubble.removeAttribute("data-h-index");
+      bubble._job = job;
+
+      try {
+        if (job.image) await describeImage(job.image, job.content, bubble, generation, controller);
+        else await streamAnswer(bubble, generation, controller);
+        if (generation === state.generation && state.history.at(-1)?.role === "assistant") {
+          bubble.dataset.hIndex = String(state.history.length - 1);
+          setAnswerActions(bubble);
+        }
+      } catch (error) {
+        if (generation !== state.generation) return;
+        if (error.name === "AbortError") {
+          bubble.textContent = "Stopped.";
+          if (state.history.at(-1)?.role === "user") state.history.pop();
+          note("Request stopped.");
+        } else {
+          bubble.className = "msg bot error";
+          bubble.textContent = friendlyError(error);
+          if (state.history.at(-1)?.role === "user") state.history.pop();
+          setErrorActions(bubble);
+        }
+      } finally {
+        if (generation === state.generation && requestId === state.requestId) {
+          if (state.abort === controller) state.abort = null;
+          setBusy(false);
+          scrollToLatest(false);
+        }
+      }
+    }
+
+    /* Retry a failed request: restore the user turn and send it again */
+    function retryTurn(bubble) {
+      const job = bubble._job;
+      if (!job) return;
+      if (state.busy) return note("Still answering the previous message.");
+      state.history = state.history.slice(0, job.histLen);
+      state.history.push({ role: "user", content: job.content });
+      bubble.textContent = "";
+      runTurn(bubble, job);
+    }
+
+    /* Regenerate an answer: drop it and everything after it, then ask again */
+    function regenerate(bubble) {
+      const job = bubble._job;
+      if (!job) return;
+      if (state.busy) return note("Still answering the previous message.");
+      const index = Number(bubble.dataset.hIndex);
+      if (!Number.isInteger(index) || index < 1) return;
+      state.history = state.history.slice(0, index);
+
+      let node = bubble;
+      while (node) {
+        const next = node.nextElementSibling;
+        node.remove();
+        node = next;
+      }
+      const fresh = addMessage("bot", "");
+      runTurn(fresh, job);
+    }
+
     async function send(raw, options = {}) {
       if (state.recorder) return note("Finish the voice recording before sending another message.");
       if (state.busy) return note("Still answering the previous message.");
@@ -1405,12 +1523,6 @@
       state.pending = [];
       renderChips();
       note("");
-
-      const generation = state.generation;
-      const requestId = ++state.requestId;
-      const controller = new AbortController();
-      state.abort = controller;
-      setBusy(true);
 
       const image = attachments.find((item) => item.kind === "image");
       const documents = attachments.filter((item) => item.kind === "doc");
@@ -1424,32 +1536,10 @@
         .filter(Boolean)
         .join("\n");
       addMessage("user", visibleLabel);
+      const histLen = state.history.length;
       state.history.push({ role: "user", content });
       const bubble = addMessage("bot", "");
-
-      try {
-        if (image) await describeImage(image, content, bubble, generation, controller);
-        else await streamAnswer(bubble, generation, controller);
-      } catch (error) {
-        if (generation !== state.generation) return;
-        if (error.name === "AbortError") {
-          bubble.textContent = "Stopped.";
-          if (state.history.at(-1)?.role === "user") state.history.pop();
-          note("Request stopped.");
-        } else {
-          bubble.className = "msg bot error";
-          bubble.textContent = error.message || "Something went wrong. Please try again.";
-          if (state.history.at(-1)?.role === "user") state.history.pop();
-          state.pending.unshift(...attachments);
-          renderChips();
-        }
-      } finally {
-        if (generation === state.generation && requestId === state.requestId) {
-          if (state.abort === controller) state.abort = null;
-          setBusy(false);
-          scrollToLatest(false);
-        }
-      }
+      await runTurn(bubble, { image: image ?? null, content, histLen });
     }
 
     function submit() {
@@ -1511,6 +1601,15 @@
       const suggestion = target.closest("[data-s]");
       if (suggestion && !state.busy) {
         send(suggestion.dataset.s || "");
+        return;
+      }
+
+      const actionButton = target.closest(".regen-btn, .retry-btn");
+      if (actionButton) {
+        const answer = actionButton.closest(".msg.bot");
+        if (!answer) return;
+        if (actionButton.classList.contains("regen-btn")) regenerate(answer);
+        else retryTurn(answer);
         return;
       }
 
